@@ -29,6 +29,8 @@ const PORTAL = "https://codearts.huaweicloud.com/portal"
 const TOKENS = STS + "/v1/oauth2/tokens"
 const TICKET = INFERHUB + "/snap-manager/v1/login/ticket"
 const CURRENT_USER = INFERHUB + "/snap-manager/v1/current/user"
+// the account's credit allowance, read with the same signed GETs
+const STATISTICS = INFERHUB + "/snap-manager/v1/statistics/plugin"
 const USERAGENTS = INFERHUB + "/v1/agent-center/agents/useragents"
 const AGENT_DETAIL = INFERHUB + "/v1/agent-center/agents/detail"
 const CLIENT_ID = "CodeArts_Tui"
@@ -194,13 +196,101 @@ async function currentUser(creds) {
   }
 }
 
+// ---- the account's allowance (magpie's usage card) ----
+
+// the credit buckets CodeArts reports, in the card's words
+const CREDIT_METRIC_LABELS = {
+  usageTotalPackageCredit: "总积分",
+  usageBasicPackageCredit: "基础积分包",
+  usageOnDemandPackageCredit: "按需积分包",
+  usageBonusPackageCredit: "赠送积分包",
+}
+const TOTAL_CREDIT_METRIC = "usageTotalPackageCredit"
+
+// compact credit counts: 12345 → "1.2万", 0.01 stays "0.01"
+function formatCredit(n) {
+  const v = Math.max(0, Number.isFinite(n) ? n : 0)
+  if (v >= 1e8) return `${(v / 1e8).toFixed(1)}亿`
+  if (v >= 1e4) return `${(v / 1e4).toFixed(1)}万`
+  return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(2)))
+}
+
+const clampPercent = (n) => Math.min(100, Math.max(0, n))
+const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : Number(v) || 0)
+
+// usageFromStatistics maps snap-manager's statistics/plugin answer to
+// magpie's auth.usage shape: the package names the plan, and the credit
+// buckets become windows, the package total first.
+function usageFromStatistics(raw) {
+  let data = raw
+  if (raw && typeof raw.code === "number") {
+    if (raw.code !== 0) return { error: raw.message || raw.msg || `CodeArts code ${raw.code}`, windows: [] }
+    data = raw.data
+  }
+  if (!data || typeof data !== "object") return { error: "CodeArts answered nothing", windows: [] }
+  const pkg = data.package && typeof data.package === "object" ? data.package : {}
+  const plan = pkg.package_name_cn || pkg.package_name_en || pkg.spec_code || ""
+  const metrics = Array.isArray(data.metrics) ? data.metrics : []
+  const windows = []
+  for (const item of metrics) {
+    if (!item || typeof item !== "object") continue
+    const name = CREDIT_METRIC_LABELS[item.name]
+    if (!name) continue
+    const limit = num(item.package_credit_amount)
+    const remain = num(item.package_credit_remain)
+    if (limit <= 0 && remain <= 0) continue // an empty bucket says nothing
+    const used = item.package_credit_used != null ? num(item.package_credit_used) : Math.max(0, limit - remain)
+    windows.push({
+      name,
+      used: limit > 0 ? clampPercent((used / limit) * 100) : 0,
+      display: `${formatCredit(used)} / ${formatCredit(limit)}`,
+      amount: used,
+      limit,
+      unit: "credits",
+    })
+  }
+  // the package total on top, then the buckets that make it up
+  const totalLabel = CREDIT_METRIC_LABELS[TOTAL_CREDIT_METRIC]
+  windows.sort((a, b) => (a.name === totalLabel ? -1 : b.name === totalLabel ? 1 : 0))
+  if (windows.length > 0) return { plan: plan || undefined, signIn: "kept", windows }
+  return { plan: plan || undefined, windows, error: "该账号无积分额度" }
+}
+
+// accountName is the account as CodeArts names it: sign-ins made before
+// this plugin stored the name kept the whole current/user answer there.
+function accountName(auth) {
+  const id = typeof auth?.accountId === "string" ? auth.accountId.trim() : ""
+  if (!id) return ""
+  if (!id.startsWith("{")) return id
+  try {
+    const u = JSON.parse(id)
+    return u?.user_name || u?.domain_name || u?.user_id || ""
+  } catch {
+    return ""
+  }
+}
+
+// accountHeader is the id part x-agent-user-account carries; an accountId
+// stored as the current/user answer keeps its id.
+function accountHeader(accountId) {
+  const id = typeof accountId === "string" ? accountId.trim() : ""
+  if (!id) return ""
+  if (!id.startsWith("{")) return id
+  try {
+    const u = JSON.parse(id)
+    return u?.user_id || u?.domain_id || ""
+  } catch {
+    return ""
+  }
+}
+
 // refreshTokens renews the credentials with the kept refresh token. A
 // refresh token spent or turned away fails 400/401: the account is asked
 // to sign in again.
 async function refreshTokens(refreshToken, pair, accountId) {
   const res = await fetch(TOKENS, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json", DPoP: await dpopProof(pair, TOKENS), "x-agent-user-account": accountId || "" },
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json", DPoP: await dpopProof(pair, TOKENS), "x-agent-user-account": accountHeader(accountId) },
     body: new URLSearchParams({ client_id: CLIENT_ID, refresh_token: refreshToken, grant_type: "refresh_token" }).toString(),
   })
   if (!res.ok) {
@@ -278,7 +368,9 @@ function authorize(log) {
           refresh: refreshToken ?? "",
           access: JSON.stringify({ ...credentials, dpop_key_pair: pair }),
           expires: Date.parse(credentials.expiration) || Date.now() + 3600_000,
-          accountId: user ? JSON.stringify(user) : "",
+          // magpie shows this as the account's name; the whole user record
+          // made every card and login list show a JSON blob
+          accountId: user ? (user.user_name || user.domain_name || user.user_id || "") : "",
         }
       } catch (e) {
         return { type: "failed", error: e?.message ?? String(e) }
@@ -472,6 +564,23 @@ export async function CodeArtsPlugin({ client }) {
           expires: Date.parse(env.credentials.expiration) || Date.now() + 3600_000,
         }
       },
+      // magpie's own hook: how much of the plan is left, as CodeArts'
+      // statistics page reads it. The package names the plan, the credit
+      // buckets are the windows; magpie shows the account's name beside it.
+      async usage(getAuth) {
+        const auth = await getAuth()
+        const creds = credsOf(auth)
+        if (!creds) return { error: "not signed in", windows: [] }
+        try {
+          const raw = await callCodearts(STATISTICS, { creds, agentType: "PromptCenter" })
+          const out = usageFromStatistics(raw)
+          const user = accountName(auth)
+          if (user) out.user = user
+          return out
+        } catch (e) {
+          return { error: e?.message ?? String(e), windows: [] }
+        }
+      },
       methods: [
         {
           type: "oauth",
@@ -486,5 +595,5 @@ export async function CodeArtsPlugin({ client }) {
 // for tests — a function, not an object: CodeArts calls every export of a
 // plugin file, and one that isn't callable silently disables the whole file
 export function _internal() {
-  return { sign, canonicalQuery, canonicalURI, hwUrlEncode, exchangeCode, pollTicket, refreshTokens, currentUser, fetchModels, credsOf, entry, chatHeaders, MODELS }
+  return { sign, canonicalQuery, canonicalURI, hwUrlEncode, exchangeCode, pollTicket, refreshTokens, currentUser, fetchModels, credsOf, entry, chatHeaders, usageFromStatistics, accountName, accountHeader, MODELS }
 }

@@ -1,6 +1,6 @@
 {
   "name": "magpie-codearts",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "CodeArts for magpie, both ways: use Huawei Cloud CodeArts' models in magpie, and drive the CodeArts CLI on magpie's models from the Agents page.",
   "type": "module",
   "main": "index.mjs",

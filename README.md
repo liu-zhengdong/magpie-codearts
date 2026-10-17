@@ -50,6 +50,7 @@ curl http://127.0.0.1:3425/v1/chat/completions \
 
 - **登录**：走 CodeArts_Tui 的 OAuth（PKCE + DPoP），本地回调服务器接收授权码，STS 端点换取临时凭据 `{access_key_id, secret_access_key, security_token}`（约 1 小时有效）。magpie 在过期前 5 分钟用 refresh token 自动续期。
 - **模型列表**：调用 agent-center 的 useragents/detail 接口获取账号可用模型；失败时回退到内置表（GLM-5.2、glm-5.2-sft-harmony、openpangu-2.0-pro、openpangu-2.0-flash）。
+- **额度**：签名读取 `snap-manager/v1/statistics/plugin`，把套餐名、账号名和积分桶（总积分、基础、按需、赠送）报给 magpie 的用量卡片。
 - **对话**：POST `{inferhub}/api/v2/chat/completions`，OpenAI 兼容流式响应，请求按华为云 SDK-HMAC-SHA256 方案签名并附 x-ot-* 追踪头（与 CodeArts CLI 26.9.12 相同）。
 
 ## 许可
