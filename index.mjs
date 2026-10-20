@@ -42,11 +42,20 @@ const DEFAULT_AGENT = "a8bcb36232554267a5142361cc25a393"
 // what the chat endpoint takes in `model`; the names are what CodeArts
 // shows — the CLI's own table, drawn from the same fetch this plugin
 // makes, names them this way. All of them think.
+//
+// The last four are in the CLI's CAG global catalog but not in the
+// default agent's gpts.models, so fetchModels never sees them; the chat
+// endpoint still routes them. They stay in the table so a live fetch
+// cannot hide them.
 const MODELS = [
   { key: "GLM-5.2", name: "GLM-5.2", context: 202752, input: 196608, output: 131072, reasoning: true },
   { key: "glm-5.2-sft-harmony", name: "GLM-5.2-ArkTS-SPARK", context: 202752, input: 196608, output: 131072, reasoning: true },
   { key: "openpangu-2.0-pro", name: "OpenPangu-2.0-Pro", context: 524288, input: 512000, output: 131072, reasoning: true },
   { key: "openpangu-2.0-flash", name: "OpenPangu-2.0-Flash", context: 524288, input: 512000, output: 131072, reasoning: true },
+  { key: "deepseek-v4-flash-0731", name: "DeepSeek-V4-Flash-0731", context: 1048576, output: 393216, reasoning: true },
+  { key: "glm-5.3-flash", name: "GLM-5.3-Flash", context: 1048576, output: 131072, reasoning: true },
+  { key: "deepseek-v4-pro-0813", name: "DeepSeek-V4-Pro-0813", context: 1000000, output: 393216, reasoning: true },
+  { key: "deepseek-v4.1-flash", name: "DeepSeek-V4.1-Flash", context: 1000000, output: 384000, reasoning: true },
 ]
 
 const STATUS_TEXT = { 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed",
@@ -406,7 +415,9 @@ export async function CodeArtsPlugin({ client }) {
         try {
           const live = await fetchModels(creds)
           if (!live.length) throw new Error("CodeArts named no models")
-          return Object.fromEntries(live.map((m) => [m.key, entry(m)]))
+          // The live list is the default agent's five models; keep the
+          // CAG-only models in the table visible alongside it.
+          return { ...STATIC_MODELS, ...Object.fromEntries(live.map((m) => [m.key, entry(m)])) }
         } catch (e) {
           log(`models fetch failed, table stands in: ${e?.message ?? e}`)
           const out = { ...STATIC_MODELS }
